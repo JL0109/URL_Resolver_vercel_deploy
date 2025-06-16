@@ -49,7 +49,7 @@ HTML_TEMPLATE = '''
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             line-height: 1.6;
             color: #333;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
             min-height: 100vh;
             padding: 20px;
         }
@@ -64,7 +64,7 @@ HTML_TEMPLATE = '''
         }
         
         .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
             color: white;
             text-align: center;
             padding: 40px 30px;
@@ -100,8 +100,8 @@ HTML_TEMPLATE = '''
         }
         
         .upload-section:hover {
-            border-color: #667eea;
-            background: #f0f2ff;
+            border-color: #dc3545;
+            background: #ffebee;
         }
         
         .settings {
@@ -140,12 +140,12 @@ HTML_TEMPLATE = '''
         
         .form-control:focus {
             outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+            border-color: #dc3545;
+            box-shadow: 0 0 0 3px rgba(220, 53, 69, 0.1);
         }
         
         .btn {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
             color: white;
             padding: 15px 30px;
             border: none;
@@ -160,7 +160,7 @@ HTML_TEMPLATE = '''
         
         .btn:hover {
             transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+            box-shadow: 0 6px 20px rgba(220, 53, 69, 0.4);
         }
         
         .btn:disabled {
@@ -455,13 +455,13 @@ def process_urls():
         
         # Process each URL with timeout protection
         for idx, row in urls_to_process.iterrows():
-            # Check if we're approaching Vercel's timeout (8 seconds to be safe)
-            if time.time() - start_time > 8:
+            # Check if we're approaching Vercel's timeout (7 seconds to be safe, leaving time for archiving)
+            if time.time() - start_time > 7:
                 # Mark remaining URLs as timeout
                 remaining_urls = urls_to_process.iloc[processed_count:]
                 for remaining_idx in remaining_urls.index:
                     df.at[remaining_idx, 'status'] = 'Timeout'
-                    df.at[remaining_idx, 'error_message'] = 'Processing timeout - increase max_urls setting or run locally'
+                    df.at[remaining_idx, 'error_message'] = 'Processing timeout - reduce batch size or run locally for large datasets'
                     error_count += 1
                     processed_count += 1
                 break
@@ -473,13 +473,13 @@ def process_urls():
                 resolved_url, redirect_chain = resolve_with_retries(original_url, max_retries)
                 
                 if resolved_url:
-                    # Archive in Wayback Machine (skip for speed in Vercel)
-                    # wayback_url = archive_with_retries(resolved_url, max_retries)
+                    # Archive in Wayback Machine
+                    wayback_url = archive_with_retries(resolved_url, max_retries)
                     
                     # Update dataframe
                     df.at[idx, 'resolved_url'] = resolved_url
                     df.at[idx, 'redirect_chain'] = ' -> '.join(redirect_chain) if redirect_chain else original_url
-                    df.at[idx, 'wayback_url'] = 'Skipped in Vercel deployment'  # wayback_url if wayback_url else 'Failed to archive'
+                    df.at[idx, 'wayback_url'] = wayback_url if wayback_url else 'Failed to archive'
                     df.at[idx, 'status'] = 'Success'
                     df.at[idx, 'error_message'] = ''
                     
@@ -558,15 +558,20 @@ def resolve_with_retries(url, max_retries):
     return None, []
 
 def archive_with_retries(url, max_retries):
-    """Archive URL with retry mechanism"""
+    """Archive URL with retry mechanism - optimized for Vercel"""
     for attempt in range(max_retries + 1):
         try:
-            return wayback_archiver.archive_url(url)
+            result = wayback_archiver.archive_url(url)
+            # Don't retry if we got a message response (like "Rate limited")
+            if result and not result.startswith(('Failed', 'Error', 'Timeout')):
+                return result
+            elif attempt == max_retries:
+                return result or 'Failed to archive after retries'
         except Exception as e:
             if attempt == max_retries:
-                return None
+                return f'Archive error: {str(e)[:30]}...'
             time.sleep(0.1)  # Very short delay for Vercel
-    return None
+    return 'Failed to archive'
 
 # Vercel entry point
 app = app
