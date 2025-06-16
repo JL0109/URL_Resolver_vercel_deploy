@@ -6,9 +6,9 @@ from typing import Optional
 from datetime import datetime
 
 class WaybackArchiver:
-    """Handles archiving URLs in the Wayback Machine"""
+    """Handles archiving URLs in the Wayback Machine - optimized for Vercel"""
     
-    def __init__(self, timeout: int = 30):
+    def __init__(self, timeout: int = 8):  # Reduced timeout for Vercel
         """
         Initialize Wayback Machine archiver
         
@@ -46,12 +46,12 @@ class WaybackArchiver:
             url = 'https://' + url
         
         try:
-            # First, check if URL is already archived recently (within last 24 hours)
-            existing_archive = self.check_recent_archive(url)
+            # First, check if URL is already archived recently (within last 7 days for speed)
+            existing_archive = self.check_recent_archive(url, hours=168)  # 7 days
             if existing_archive:
                 return existing_archive
             
-            # Archive the URL
+            # Archive the URL with shorter timeout
             archive_url = self.save_api_url + urllib.parse.quote(url, safe=':/?#[]@!$&\'()*+,;=')
             
             response = self.session.get(
@@ -74,33 +74,30 @@ class WaybackArchiver:
                     return f"https://web.archive.org/web/{timestamp}/{url}"
                     
             elif response.status_code == 429:
-                # Rate limited
-                raise Exception("Rate limited by Wayback Machine. Please slow down requests.")
+                # Rate limited - return a message instead of failing
+                return "Rate limited - try again later"
                 
             elif response.status_code >= 400:
                 # Check if it's a client error that we can handle
                 if response.status_code == 403:
-                    raise Exception("Access forbidden - URL may be blocked from archiving")
+                    return "Access forbidden - URL blocked from archiving"
                 elif response.status_code == 404:
-                    raise Exception("Wayback Machine service not found")
+                    return "Wayback Machine service unavailable"
                 else:
-                    raise Exception(f"Archiving failed with status code: {response.status_code}")
+                    return f"Archiving failed (HTTP {response.status_code})"
             
-            return None
+            return "Archiving failed - unknown error"
             
         except requests.exceptions.Timeout:
-            raise Exception(f"Archiving timeout after {self.timeout} seconds")
+            return "Archiving timeout - service too slow"
         except requests.exceptions.ConnectionError:
-            raise Exception("Connection error - unable to reach Wayback Machine")
+            return "Connection error - unable to reach Wayback Machine"
         except requests.exceptions.RequestException as e:
-            raise Exception(f"Request failed: {str(e)}")
+            return f"Request failed: {str(e)[:50]}..."  # Truncate long error messages
         except Exception as e:
-            if "Rate limited" in str(e) or "Access forbidden" in str(e):
-                raise e
-            else:
-                raise Exception(f"Unexpected error during archiving: {str(e)}")
+            return f"Unexpected error: {str(e)[:50]}..."
     
-    def check_recent_archive(self, url: str, hours: int = 24) -> Optional[str]:
+    def check_recent_archive(self, url: str, hours: int = 168) -> Optional[str]:  # 7 days default
         """
         Check if URL has been archived recently
         
@@ -112,7 +109,7 @@ class WaybackArchiver:
             URL of recent archive if found, None otherwise
         """
         try:
-            # Use availability API to check for recent archives
+            # Use availability API to check for recent archives with shorter timeout
             params = {
                 'url': url,
                 'timestamp': datetime.utcnow().strftime('%Y%m%d%H%M%S')
@@ -121,7 +118,7 @@ class WaybackArchiver:
             response = self.session.get(
                 self.availability_api_url,
                 params=params,
-                timeout=10  # Shorter timeout for availability check
+                timeout=3  # Very short timeout for availability check
             )
             
             if response.status_code == 200:
@@ -145,8 +142,8 @@ class WaybackArchiver:
                             if time_diff.total_seconds() < (hours * 3600):
                                 return snapshot_url
                         except ValueError:
-                            # If we can't parse the timestamp, skip the recent check
-                            pass
+                            # If we can't parse the timestamp, use the archive anyway
+                            return snapshot_url
             
             return None
             
@@ -165,13 +162,6 @@ class WaybackArchiver:
             Timestamp string or None
         """
         try:
-            # Look for timestamp in response headers
-            if 'x-archive-wayback-runtime-info' in response.headers:
-                runtime_info = response.headers['x-archive-wayback-runtime-info']
-                # Parse runtime info for timestamp
-                # This is a best-effort attempt
-                pass
-            
             # Look for timestamp in response URL
             if 'web.archive.org/web/' in response.url:
                 parts = response.url.split('web.archive.org/web/')
