@@ -227,7 +227,13 @@ HTML_TEMPLATE = '''
             {% endif %}
             
             <div class="warning">
-                <strong>Note:</strong> Due to Vercel's 10-second timeout limit, please limit file size to small datasets (under 100 URLs) for best results.
+                <strong>Vercel Performance Tips:</strong>
+                <ul style="margin: 10px 0; padding-left: 20px;">
+                    <li>Process <strong>10-20 URLs at a time</strong> for best results</li>
+                    <li>Large files will timeout - split into smaller batches</li>
+                    <li>For 100+ URLs, consider running locally or use multiple batches</li>
+                    <li>Each batch processes in under 10 seconds</li>
+                </ul>
             </div>
 
             <div class="upload-section">
@@ -245,7 +251,8 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="form-group">
                         <label for="delay">Delay Between Requests (seconds):</label>
-                        <input type="number" id="delay" class="form-control" value="0.5" min="0.1" max="2.0" step="0.1">
+                        <input type="number" id="delay" class="form-control" value="0.1" min="0.0" max="1.0" step="0.1">
+                        <small style="color: #666; font-size: 12px;">Lower values = faster processing, but may hit rate limits</small>
                     </div>
                     <div class="form-group">
                         <label for="retries">Maximum Retries:</label>
@@ -253,7 +260,8 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="form-group">
                         <label for="maxUrls">Max URLs to Process:</label>
-                        <input type="number" id="maxUrls" class="form-control" value="50" min="1" max="100">
+                        <input type="number" id="maxUrls" class="form-control" value="20" min="1" max="50">
+                        <small style="color: #666; font-size: 12px;">Recommended: 10-20 URLs for best performance on Vercel</small>
                     </div>
                 </div>
             </div>
@@ -276,8 +284,14 @@ HTML_TEMPLATE = '''
                 <h4>Supported URL Shorteners</h4>
                 <p>bit.ly, tinyurl.com, t.co (Twitter), goo.gl, short.link, and many more!</p>
                 
-                <h4>Vercel Limitations</h4>
-                <p>This deployment has a 10-second timeout. For larger datasets, consider running locally or using a different hosting platform.</p>
+                <h4>Vercel Limitations & Batch Processing</h4>
+                <p>This deployment has a 10-second timeout per request. For optimal results:</p>
+                <ul>
+                    <li><strong>Small batches (10-20 URLs):</strong> Process quickly and reliably</li>
+                    <li><strong>Medium datasets (50-100 URLs):</strong> Split into multiple batches</li>
+                    <li><strong>Large datasets (100+ URLs):</strong> Consider running locally for best performance</li>
+                    <li><strong>Tip:</strong> You can process the same file multiple times with different row ranges</li>
+                </ul>
             </div>
         </div>
     </div>
@@ -292,6 +306,16 @@ HTML_TEMPLATE = '''
             status.style.display = 'block';
         }
 
+        function updateProgress(current, total, timeElapsed) {
+            const percent = Math.round((current / total) * 100);
+            const avgTimePerUrl = timeElapsed / current;
+            const estimatedTotalTime = avgTimePerUrl * total;
+            const timeRemaining = Math.max(0, estimatedTotalTime - timeElapsed);
+            
+            const message = `Processing ${current}/${total} URLs (${percent}%) - Est. ${Math.round(timeRemaining)}s remaining`;
+            showStatus(message, 'info');
+        }
+
         async function processUrls() {
             const fileInput = document.getElementById('fileInput');
             const file = fileInput.files[0];
@@ -299,6 +323,15 @@ HTML_TEMPLATE = '''
             if (!file) {
                 showStatus('Please select a file first.', 'error');
                 return;
+            }
+
+            const maxUrls = parseInt(document.getElementById('maxUrls').value);
+            
+            // Warn if batch size is too large
+            if (maxUrls > 30) {
+                if (!confirm(`Processing ${maxUrls} URLs may timeout on Vercel. Recommended batch size is 10-20. Continue anyway?`)) {
+                    return;
+                }
             }
 
             // Check file size
@@ -419,9 +452,9 @@ def process_urls():
             return jsonify({'error': 'No file selected'}), 400
         
         url_column = request.form.get('url_column', 'url')
-        delay = float(request.form.get('delay', 0.5))
+        delay = float(request.form.get('delay', 0.2))  # Reduced default delay
         max_retries = int(request.form.get('retries', 1))
-        max_urls = int(request.form.get('max_urls', 50))
+        max_urls = int(request.form.get('max_urls', 20))  # Reduced default batch size
         
         # Load the spreadsheet
         df = spreadsheet_processor.load_file(file)
@@ -453,15 +486,27 @@ def process_urls():
         
         start_time = time.time()
         
-        # Process each URL with timeout protection
+        # Process each URL with intelligent timeout protection
+        estimated_time_per_url = 0.5  # Conservative estimate including archiving
+        max_safe_urls = min(max_urls, int(8 / estimated_time_per_url))  # Leave 2 seconds buffer
+        
+        # If we have more URLs than we can safely process, limit them
+        if len(urls_to_process) > max_safe_urls:
+            urls_to_process = urls_to_process.head(max_safe_urls)
+            total_urls = len(urls_to_process)
+        
         for idx, row in urls_to_process.iterrows():
-            # Check if we're approaching Vercel's timeout (7 seconds to be safe, leaving time for archiving)
-            if time.time() - start_time > 7:
-                # Mark remaining URLs as timeout
+            # Dynamic timeout check based on progress
+            elapsed_time = time.time() - start_time
+            estimated_remaining_time = (total_urls - processed_count) * estimated_time_per_url
+            
+            # Stop if we're likely to exceed 9 seconds total
+            if elapsed_time + estimated_remaining_time > 9:
+                # Mark remaining URLs as skipped due to timeout
                 remaining_urls = urls_to_process.iloc[processed_count:]
                 for remaining_idx in remaining_urls.index:
-                    df.at[remaining_idx, 'status'] = 'Timeout'
-                    df.at[remaining_idx, 'error_message'] = 'Processing timeout - reduce batch size or run locally for large datasets'
+                    df.at[remaining_idx, 'status'] = 'Skipped'
+                    df.at[remaining_idx, 'error_message'] = 'Skipped to avoid timeout - process in smaller batches'
                     error_count += 1
                     processed_count += 1
                 break
@@ -496,9 +541,14 @@ def process_urls():
             
             processed_count += 1
             
-            # Minimal delay for Vercel
+            # Minimal delay for Vercel - adaptive based on time remaining
             if processed_count < total_urls and delay > 0:
-                time.sleep(min(delay, 0.2))  # Cap at 0.2s for Vercel
+                remaining_time = 9 - (time.time() - start_time)
+                remaining_urls_count = total_urls - processed_count
+                max_delay = remaining_time / max(remaining_urls_count, 1) - 0.3  # Reserve time for processing
+                actual_delay = min(delay, max_delay, 0.1)  # Cap at 0.1s
+                if actual_delay > 0:
+                    time.sleep(actual_delay)
         
         # Convert to JSON-serializable format
         result_data = df.to_dict('records')
