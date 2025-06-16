@@ -2,11 +2,18 @@ from flask import Flask, render_template_string, request, jsonify, send_file
 import pandas as pd
 import time
 import io
+import os
 from datetime import datetime
 
 app = Flask(__name__)
 
-# Import modules with error handling
+# Configure for Vercel
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+
+# Import modules with better error handling
+modules_loaded = False
+error_message = ""
+
 try:
     from url_resolver import URLResolver
     from wayback_archiver import WaybackArchiver
@@ -18,8 +25,11 @@ try:
     spreadsheet_processor = SpreadsheetProcessor()
     modules_loaded = True
 except ImportError as e:
-    print(f"Import error: {e}")
-    modules_loaded = False
+    error_message = f"Import error: {e}"
+    print(error_message)
+except Exception as e:
+    error_message = f"Initialization error: {e}"
+    print(error_message)
 
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
@@ -68,6 +78,15 @@ HTML_TEMPLATE = '''
         
         .content {
             padding: 40px;
+        }
+        
+        .warning {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
         }
         
         .upload-section {
@@ -200,10 +219,21 @@ HTML_TEMPLATE = '''
         </div>
 
         <div class="content">
+            {% if not modules_loaded %}
+            <div class="warning">
+                <strong>Warning:</strong> Some modules failed to load. Application may not work properly.<br>
+                Error: {{ error_message }}
+            </div>
+            {% endif %}
+            
+            <div class="warning">
+                <strong>Note:</strong> Due to Vercel's 10-second timeout limit, please limit file size to small datasets (under 100 URLs) for best results.
+            </div>
+
             <div class="upload-section">
                 <h3>Upload Spreadsheet</h3>
                 <input type="file" id="fileInput" accept=".csv,.xlsx,.xls" class="form-control" style="margin-bottom: 15px;">
-                <p>Supported formats: CSV, Excel (.xlsx, .xls)</p>
+                <p>Supported formats: CSV, Excel (.xlsx, .xls) - Max 16MB</p>
             </div>
 
             <div class="settings">
@@ -215,11 +245,15 @@ HTML_TEMPLATE = '''
                     </div>
                     <div class="form-group">
                         <label for="delay">Delay Between Requests (seconds):</label>
-                        <input type="number" id="delay" class="form-control" value="1.0" min="0.1" max="5.0" step="0.1">
+                        <input type="number" id="delay" class="form-control" value="0.5" min="0.1" max="2.0" step="0.1">
                     </div>
                     <div class="form-group">
                         <label for="retries">Maximum Retries:</label>
-                        <input type="number" id="retries" class="form-control" value="2" min="0" max="5">
+                        <input type="number" id="retries" class="form-control" value="1" min="0" max="3">
+                    </div>
+                    <div class="form-group">
+                        <label for="maxUrls">Max URLs to Process:</label>
+                        <input type="number" id="maxUrls" class="form-control" value="50" min="1" max="100">
                     </div>
                 </div>
             </div>
@@ -241,6 +275,9 @@ HTML_TEMPLATE = '''
                 
                 <h4>Supported URL Shorteners</h4>
                 <p>bit.ly, tinyurl.com, t.co (Twitter), goo.gl, short.link, and many more!</p>
+                
+                <h4>Vercel Limitations</h4>
+                <p>This deployment has a 10-second timeout. For larger datasets, consider running locally or using a different hosting platform.</p>
             </div>
         </div>
     </div>
@@ -264,11 +301,18 @@ HTML_TEMPLATE = '''
                 return;
             }
 
+            // Check file size
+            if (file.size > 16 * 1024 * 1024) {
+                showStatus('File too large. Maximum size is 16MB.', 'error');
+                return;
+            }
+
             const formData = new FormData();
             formData.append('file', file);
             formData.append('url_column', document.getElementById('urlColumn').value);
             formData.append('delay', document.getElementById('delay').value);
             formData.append('retries', document.getElementById('retries').value);
+            formData.append('max_urls', document.getElementById('maxUrls').value);
 
             const processBtn = document.getElementById('processBtn');
             processBtn.disabled = true;
@@ -349,20 +393,21 @@ HTML_TEMPLATE = '''
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    return render_template_string(HTML_TEMPLATE, modules_loaded=modules_loaded, error_message=error_message)
 
 @app.route('/health')
 def health_check():
     return jsonify({
         'status': 'ok',
         'modules_loaded': modules_loaded,
+        'error_message': error_message if not modules_loaded else None,
         'timestamp': datetime.utcnow().isoformat()
     })
 
 @app.route('/process', methods=['POST'])
 def process_urls():
     if not modules_loaded:
-        return jsonify({'error': 'Required modules not loaded properly'}), 500
+        return jsonify({'error': f'Required modules not loaded properly: {error_message}'}), 500
     
     try:
         # Validate file upload
@@ -374,8 +419,9 @@ def process_urls():
             return jsonify({'error': 'No file selected'}), 400
         
         url_column = request.form.get('url_column', 'url')
-        delay = float(request.form.get('delay', 1.0))
-        max_retries = int(request.form.get('retries', 2))
+        delay = float(request.form.get('delay', 0.5))
+        max_retries = int(request.form.get('retries', 1))
+        max_urls = int(request.form.get('max_urls', 50))
         
         # Load the spreadsheet
         df = spreadsheet_processor.load_file(file)
@@ -394,8 +440,8 @@ def process_urls():
         df['status'] = ''
         df['error_message'] = ''
         
-        # Filter rows with non-empty URLs
-        urls_to_process = df[df[url_column].notna() & (df[url_column] != '')]
+        # Filter rows with non-empty URLs and limit for Vercel
+        urls_to_process = df[df[url_column].notna() & (df[url_column] != '')].head(max_urls)
         total_urls = len(urls_to_process)
         
         if total_urls == 0:
@@ -405,8 +451,21 @@ def process_urls():
         success_count = 0
         error_count = 0
         
-        # Process each URL
+        start_time = time.time()
+        
+        # Process each URL with timeout protection
         for idx, row in urls_to_process.iterrows():
+            # Check if we're approaching Vercel's timeout (8 seconds to be safe)
+            if time.time() - start_time > 8:
+                # Mark remaining URLs as timeout
+                remaining_urls = urls_to_process.iloc[processed_count:]
+                for remaining_idx in remaining_urls.index:
+                    df.at[remaining_idx, 'status'] = 'Timeout'
+                    df.at[remaining_idx, 'error_message'] = 'Processing timeout - increase max_urls setting or run locally'
+                    error_count += 1
+                    processed_count += 1
+                break
+            
             original_url = str(row[url_column]).strip()
             
             try:
@@ -414,13 +473,13 @@ def process_urls():
                 resolved_url, redirect_chain = resolve_with_retries(original_url, max_retries)
                 
                 if resolved_url:
-                    # Archive in Wayback Machine
-                    wayback_url = archive_with_retries(resolved_url, max_retries)
+                    # Archive in Wayback Machine (skip for speed in Vercel)
+                    # wayback_url = archive_with_retries(resolved_url, max_retries)
                     
                     # Update dataframe
                     df.at[idx, 'resolved_url'] = resolved_url
                     df.at[idx, 'redirect_chain'] = ' -> '.join(redirect_chain) if redirect_chain else original_url
-                    df.at[idx, 'wayback_url'] = wayback_url if wayback_url else 'Failed to archive'
+                    df.at[idx, 'wayback_url'] = 'Skipped in Vercel deployment'  # wayback_url if wayback_url else 'Failed to archive'
                     df.at[idx, 'status'] = 'Success'
                     df.at[idx, 'error_message'] = ''
                     
@@ -437,9 +496,9 @@ def process_urls():
             
             processed_count += 1
             
-            # Rate limiting (reduced for serverless)
+            # Minimal delay for Vercel
             if processed_count < total_urls and delay > 0:
-                time.sleep(min(delay, 0.3))  # Cap at 0.3s for Vercel
+                time.sleep(min(delay, 0.2))  # Cap at 0.2s for Vercel
         
         # Convert to JSON-serializable format
         result_data = df.to_dict('records')
@@ -495,7 +554,7 @@ def resolve_with_retries(url, max_retries):
         except Exception as e:
             if attempt == max_retries:
                 raise e
-            time.sleep(0.2)  # Shorter delay for serverless
+            time.sleep(0.1)  # Very short delay for Vercel
     return None, []
 
 def archive_with_retries(url, max_retries):
@@ -506,7 +565,7 @@ def archive_with_retries(url, max_retries):
         except Exception as e:
             if attempt == max_retries:
                 return None
-            time.sleep(0.2)  # Shorter delay for serverless
+            time.sleep(0.1)  # Very short delay for Vercel
     return None
 
 # Vercel entry point
