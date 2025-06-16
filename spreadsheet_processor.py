@@ -1,3 +1,4 @@
+
 import pandas as pd
 import io
 from typing import Union, Optional
@@ -17,7 +18,7 @@ class SpreadsheetProcessor:
         Load a spreadsheet file into a pandas DataFrame
         
         Args:
-            uploaded_file: Streamlit uploaded file object
+            uploaded_file: Flask FileStorage object or Streamlit uploaded file object
             
         Returns:
             pandas DataFrame containing the spreadsheet data
@@ -25,14 +26,29 @@ class SpreadsheetProcessor:
         if uploaded_file is None:
             raise ValueError("No file provided")
         
-        file_extension = self.get_file_extension(uploaded_file.name)
+        # Handle both Flask FileStorage and Streamlit UploadedFile
+        filename = getattr(uploaded_file, 'filename', '') or getattr(uploaded_file, 'name', '')
+        
+        if not filename:
+            raise ValueError("Could not determine filename")
+        
+        file_extension = self.get_file_extension(filename)
         
         if file_extension not in self.supported_formats:
-            raise ValueError(f"Unsupported file format. Supported formats: {', '.join(self.supported_formats)}")
+            raise ValueError(f"Unsupported file format '{file_extension}'. Supported formats: {', '.join(self.supported_formats)}")
         
         try:
             # Reset file pointer to beginning
-            uploaded_file.seek(0)
+            if hasattr(uploaded_file, 'seek'):
+                uploaded_file.seek(0)
+            
+            # Read file content into BytesIO for consistent handling
+            if hasattr(uploaded_file, 'read'):
+                file_content = uploaded_file.read()
+            else:
+                file_content = uploaded_file.getvalue()
+            
+            file_buffer = io.BytesIO(file_content)
             
             if file_extension == '.csv':
                 # Try different encodings for CSV files
@@ -40,30 +56,32 @@ class SpreadsheetProcessor:
                 
                 for encoding in encodings:
                     try:
-                        uploaded_file.seek(0)
-                        df = pd.read_csv(uploaded_file, encoding=encoding)
+                        file_buffer.seek(0)
+                        df = pd.read_csv(file_buffer, encoding=encoding)
                         return self.clean_dataframe(df)
                     except (UnicodeDecodeError, UnicodeError):
                         continue
                 
                 # If all encodings fail, try with error handling
-                uploaded_file.seek(0)
-                df = pd.read_csv(uploaded_file, encoding='utf-8', errors='replace')
+                file_buffer.seek(0)
+                df = pd.read_csv(file_buffer, encoding='utf-8', errors='replace')
                 return self.clean_dataframe(df)
                 
             elif file_extension in ['.xlsx', '.xls']:
                 # Handle Excel files
                 try:
-                    df = pd.read_excel(uploaded_file, engine='openpyxl' if file_extension == '.xlsx' else None)
+                    file_buffer.seek(0)
+                    engine = 'openpyxl' if file_extension == '.xlsx' else 'xlrd'
+                    df = pd.read_excel(file_buffer, engine=engine)
                     return self.clean_dataframe(df)
                 except Exception as e:
-                    # Try with different engines if the first one fails
-                    uploaded_file.seek(0)
+                    # Try with different engine if the first one fails
                     try:
-                        df = pd.read_excel(uploaded_file, engine='xlrd')
+                        file_buffer.seek(0)
+                        df = pd.read_excel(file_buffer)  # Let pandas choose engine
                         return self.clean_dataframe(df)
-                    except:
-                        raise Exception(f"Failed to read Excel file: {str(e)}")
+                    except Exception as e2:
+                        raise Exception(f"Failed to read Excel file: {str(e)} / {str(e2)}")
             
         except Exception as e:
             raise Exception(f"Error loading file: {str(e)}")
@@ -102,9 +120,12 @@ class SpreadsheetProcessor:
         Returns:
             File extension (including the dot)
         """
-        if '.' not in filename:
+        if not filename or '.' not in filename:
             return ''
-        return '.' + filename.split('.')[-1].lower()
+        
+        # Handle cases where filename might have multiple dots
+        extension = '.' + filename.split('.')[-1].lower()
+        return extension
     
     def validate_columns(self, df: pd.DataFrame, required_columns: list) -> dict:
         """
