@@ -511,10 +511,7 @@ def archive_with_retries(url, max_retries):
             time.sleep(0.5)  # Shorter delay for serverless
     return None
 
-# Vercel serverless function handler
-def handler(event, context):
-    from werkzeug.serving import WSGIRequestHandler
-    return app
-
+# Vercel requires the app to be exported as 'app'
+# This is the main WSGI application that Vercel will use
 if __name__ == '__main__':
     app.run(debug=True)
